@@ -199,6 +199,7 @@
   
   <modules>
     <module>hello</module>
+    <module>readers</module>
     <module>itemSteps</module>
   </modules>
 </project>

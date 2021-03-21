@@ -1,0 +1,27 @@
+[
+  {
+    "firstName": "John",
+    "lastName": "Doe",
+    "email": "john.doe@example.com"
+  },
+  {
+    "firstName": "John",
+    "lastName": "McClay",
+    "email": "j_mcclay@example.com"
+  },
+  {
+    "firstName": "Ellen",
+    "lastName": "Ripley",
+    "email": "alien@area51.example.com"
+  },
+  {
+    "firstName": "Vito",
+    "lastName": "Corleone",
+    "email": "Don_Corleone@example.com"
+  },
+  {
+    "firstName": "Mia",
+    "lastName": "Wallace",
+    "email": "mwallace@example.com"
+  }
+]

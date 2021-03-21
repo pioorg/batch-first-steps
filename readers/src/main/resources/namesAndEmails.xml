@@ -1,0 +1,28 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<characters>
+    <character>
+        <firstName>John</firstName>
+        <lastName>Doe</lastName>
+        <email>john.doe@example.com</email>
+    </character>
+    <character>
+        <firstName>John</firstName>
+        <lastName>McClay</lastName>
+        <email>j_mcclay@example.com</email>
+    </character>
+    <character>
+        <firstName>Ellen</firstName>
+        <lastName>Ripley</lastName>
+        <email>alien@area51.example.com</email>
+    </character>
+    <character>
+        <firstName>Vito</firstName>
+        <lastName>Corleone</lastName>
+        <email>Don_Corleone@example.com</email>
+    </character>
+    <character>
+        <firstName>Mia</firstName>
+        <lastName>Wallace</lastName>
+        <email>mwallace@example.com</email>
+    </character>
+</characters>
