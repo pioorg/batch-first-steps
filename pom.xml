@@ -202,5 +202,6 @@
     <module>itemSteps</module>
     <module>readers</module>
     <module>writers</module>
+    <module>processors</module>
   </modules>
 </project>
