@@ -204,5 +204,6 @@
     <module>writers</module>
     <module>processors</module>
     <module>itemStream</module>
+    <module>skippingAndLoggingErrors</module>
   </modules>
 </project>
