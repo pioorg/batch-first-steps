@@ -203,5 +203,6 @@
     <module>readers</module>
     <module>writers</module>
     <module>processors</module>
+    <module>itemStream</module>
   </modules>
 </project>
