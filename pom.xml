@@ -205,5 +205,6 @@
     <module>processors</module>
     <module>itemStream</module>
     <module>skippingAndLoggingErrors</module>
+    <module>runningJobs</module>
   </modules>
 </project>
