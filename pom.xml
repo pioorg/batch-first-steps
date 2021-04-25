@@ -207,5 +207,6 @@
     <module>skippingAndLoggingErrors</module>
     <module>runningJobs</module>
     <module>testing</module>
+    <module>weather</module>
   </modules>
 </project>
