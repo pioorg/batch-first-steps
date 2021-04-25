@@ -19,6 +19,8 @@
 
 package dev.softwaregarden.spring.batch.first_steps.weather;
 
+import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.time.Instant;
 import java.util.Map;
 import java.util.Objects;
@@ -41,10 +43,16 @@ import org.springframework.batch.core.launch.support.RunIdIncrementer;
 import org.springframework.batch.item.ItemProcessor;
 import org.springframework.batch.item.ItemWriter;
 import org.springframework.batch.item.database.JdbcBatchItemWriter;
+import org.springframework.batch.item.database.JdbcPagingItemReader;
+import org.springframework.batch.item.database.Order;
 import org.springframework.batch.item.database.builder.JdbcBatchItemWriterBuilder;
+import org.springframework.batch.item.database.builder.JdbcPagingItemReaderBuilder;
 import org.springframework.batch.item.file.FlatFileItemReader;
+import org.springframework.batch.item.file.FlatFileItemWriter;
 import org.springframework.batch.item.file.MultiResourceItemReader;
+import org.springframework.batch.item.file.MultiResourceItemWriter;
 import org.springframework.batch.item.file.builder.FlatFileItemReaderBuilder;
+import org.springframework.batch.item.file.builder.MultiResourceItemWriterBuilder;
 import org.springframework.batch.item.file.mapping.FieldSetMapper;
 import org.springframework.batch.item.file.transform.DelimitedLineTokenizer;
 import org.springframework.batch.item.file.transform.LineTokenizer;
@@ -60,8 +68,15 @@ import org.springframework.classify.Classifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.Resource;
+import org.springframework.jdbc.core.namedparam.BeanPropertySqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.oxm.jaxb.Jaxb2Marshaller;
+
+interface SensorReading {
+    UUID getStationId();
+
+    Instant getTaken();
+}
 
 @SpringBootApplication
 @EnableBatchProcessing
@@ -86,6 +101,7 @@ public class WeatherReport {
             .incrementer(new RunIdIncrementer())
             .start(importStations())
             .next(importSensorReadings())
+            .next(generateStationReports())
             .build();
     }
 
@@ -229,6 +245,74 @@ public class WeatherReport {
             .build();
     }
 
+    @Bean
+    public Step generateStationReports() {
+        return stepBuilderFactory.get("generateLowestReport")
+            .<Station, StationReport>chunk(1)
+            .reader(importedStationItemRead(null))
+            .processor(reportProcessor(null))
+            .writer(stationsReportWriter(null))
+            .build();
+    }
+
+    @Bean
+    @StepScope
+    public JdbcPagingItemReader<Station> importedStationItemRead(DataSource dataSource) {
+        return new JdbcPagingItemReaderBuilder<Station>()
+            .name("dbStationReader")
+            .dataSource(dataSource)
+            .selectClause("id, temp_unit, speed_unit")
+            .fromClause("station")
+            .sortKeys(Map.of("id", Order.ASCENDING))
+            .beanRowMapper(Station.class)
+            .build();
+    }
+
+    @Bean
+    public ItemProcessor<? super Station, ? extends StationReport> reportProcessor(NamedParameterJdbcTemplate jdbcTemplate) {
+        return (ItemProcessor<Station, StationReport>) item -> {
+            var report = new StationReport(item);
+            //noinspection SqlResolve
+            jdbcTemplate.query(
+                "SELECT tp.station_id, MIN(tp.temperature) as min_temp, MAX(tp.temperature) as max_temp, " +
+                    "MIN(wr.speed) as min_wind_speed, MAX(wr.speed) as max_wind_speed " +
+                    "FROM temperature_reading tp, wind_reading wr " +
+                    "WHERE tp.station_id = :id AND wr.station_id = :id",
+                new BeanPropertySqlParameterSource(item),
+                (ResultSet rs) -> enrichStationReport(report, rs));
+            return report;
+        };
+    }
+
+    private void enrichStationReport(StationReport report, ResultSet rs) throws SQLException {
+        report.setMinTemp(rs.getDouble("min_temp"));
+        report.setMaxTemp(rs.getDouble("max_temp"));
+        report.setMinWindSpeed(rs.getDouble("min_wind_speed"));
+        report.setMaxWindSpeed(rs.getDouble("max_wind_speed"));
+    }
+
+    @Bean
+    @StepScope
+    public MultiResourceItemWriter<? super StationReport> stationsReportWriter(
+        @Value("#{jobParameters['reportsDir'] ?: 'file:./tmp/weather/reports/report'}") Resource reportDir) {
+        return new MultiResourceItemWriterBuilder<StationReport>().name("stationsReportWriter")
+            .resource(reportDir)
+            .itemCountLimitPerResource(1)
+            .delegate(stationReportItemWriter())
+            .build();
+    }
+
+    @Bean
+    public FlatFileItemWriter<StationReport> stationReportItemWriter() {
+        var writer = new FlatFileItemWriter<StationReport>();
+        writer.setName("stationReportItemWriter");
+        writer.setLineAggregator(item -> String.format(
+            "This is a report for station ID=%s, where the min temp was %.2f, the max temp was %.2f, " +
+                "the min wind speed was %.2f, and the max wind speed was %.2f.",
+            item.getStation().getId(), item.getMinTemp(), item.getMaxTemp(), item.getMinWindSpeed(), item.getMaxWindSpeed()));
+        return writer;
+    }
+
 }
 
 @XmlRootElement(name = "station")
@@ -240,28 +324,28 @@ class Station {
     public Station() {
     }
 
-    public void setId(UUID id) {
-        this.id = id;
-    }
-
-    public void setTempUnit(String tempUnit) {
-        this.tempUnit = tempUnit;
-    }
-
-    public void setSpeedUnit(String speedUnit) {
-        this.speedUnit = speedUnit;
-    }
-
     public UUID getId() {
         return id;
+    }
+
+    public void setId(UUID id) {
+        this.id = id;
     }
 
     public String getTempUnit() {
         return tempUnit;
     }
 
+    public void setTempUnit(String tempUnit) {
+        this.tempUnit = tempUnit;
+    }
+
     public String getSpeedUnit() {
         return speedUnit;
+    }
+
+    public void setSpeedUnit(String speedUnit) {
+        this.speedUnit = speedUnit;
     }
 
     @Override
@@ -287,18 +371,13 @@ class Station {
     }
 }
 
-interface SensorReading {
-    UUID getStationId();
-    Instant getTaken();
-}
-
 class TemperatureReading implements SensorReading {
     private UUID stationId;
     private Instant taken;
     private double temperature;
 
     public TemperatureReading(UUID stationId, Instant taken, double temperature) {
-        assert(stationId != null);
+        assert (stationId != null);
         this.stationId = stationId;
         this.taken = taken;
         this.temperature = temperature;
@@ -374,13 +453,13 @@ class WindReading implements SensorReading {
         return stationId;
     }
 
+    public void setStationId(UUID stationId) {
+        this.stationId = stationId;
+    }
+
     @Override
     public Instant getTaken() {
         return taken;
-    }
-
-    public void setStationId(UUID stationId) {
-        this.stationId = stationId;
     }
 
     public void setTaken(Instant taken) {
@@ -427,6 +506,65 @@ class WindReading implements SensorReading {
     }
 }
 
+class StationReport {
+    private final Station station;
+    private double minTemp;
+    private double maxTemp;
+    private double minWindSpeed;
+    private double maxWindSpeed;
+
+    public StationReport(Station station) {
+        this.station = station;
+    }
+
+    public Station getStation() {
+        return station;
+    }
+
+    public double getMinTemp() {
+        return minTemp;
+    }
+
+    public void setMinTemp(double minTemp) {
+        this.minTemp = minTemp;
+    }
+
+    public double getMaxTemp() {
+        return maxTemp;
+    }
+
+    public void setMaxTemp(double maxTemp) {
+        this.maxTemp = maxTemp;
+    }
+
+    public double getMinWindSpeed() {
+        return minWindSpeed;
+    }
+
+    public void setMinWindSpeed(double minWindSpeed) {
+        this.minWindSpeed = minWindSpeed;
+    }
+
+    public double getMaxWindSpeed() {
+        return maxWindSpeed;
+    }
+
+    public void setMaxWindSpeed(double maxWindSpeed) {
+        this.maxWindSpeed = maxWindSpeed;
+    }
+
+    @Override
+    public String toString() {
+        return new StringJoiner(", ", StationReport.class.getSimpleName() + "[", "]")
+            .add("station=" + station)
+            .add("minTemp=" + minTemp)
+            .add("maxTemp=" + maxTemp)
+            .add("minWindSpeed=" + minWindSpeed)
+            .add("maxWindSpeed=" + maxWindSpeed)
+            .toString();
+    }
+}
+
 class SensorReadingItemProcessorClassifier implements Classifier<SensorReading, ItemProcessor<?, ? extends SensorReading>> {
     @SuppressWarnings("SqlResolve")
     public static final String UNITS_QUERY = "SELECT temp_unit AS TEMP, speed_unit as SPEED FROM station WHERE id = :id";
@@ -450,14 +588,14 @@ class SensorReadingItemProcessorClassifier implements Classifier<SensorReading, 
         }
     }
 
-    private ItemProcessor<TemperatureReading,? extends SensorReading> tempNormalizingProcessor(DoubleUnaryOperator operator) {
+    private ItemProcessor<TemperatureReading, ? extends SensorReading> tempNormalizingProcessor(DoubleUnaryOperator operator) {
         return (ItemProcessor<TemperatureReading, SensorReading>) item -> {
             item.setTemperature(operator.applyAsDouble(item.getTemperature()));
             return item;
         };
     }
 
-    private ItemProcessor<WindReading,? extends SensorReading> windNormalizingProcessor(DoubleUnaryOperator operator) {
+    private ItemProcessor<WindReading, ? extends SensorReading> windNormalizingProcessor(DoubleUnaryOperator operator) {
         return (ItemProcessor<WindReading, SensorReading>) item -> {
             item.setSpeed(operator.applyAsDouble(item.getSpeed()));
             return item;
