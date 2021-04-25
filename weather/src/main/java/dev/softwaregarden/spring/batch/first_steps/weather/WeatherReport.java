@@ -19,6 +19,8 @@
 
 package dev.softwaregarden.spring.batch.first_steps.weather;
 
+import java.time.Instant;
+import java.util.Map;
 import java.util.Objects;
 import java.util.StringJoiner;
 import java.util.UUID;
@@ -33,13 +35,23 @@ import org.springframework.batch.core.configuration.annotation.JobBuilderFactory
 import org.springframework.batch.core.configuration.annotation.StepBuilderFactory;
 import org.springframework.batch.core.configuration.annotation.StepScope;
 import org.springframework.batch.core.launch.support.RunIdIncrementer;
+import org.springframework.batch.item.ItemWriter;
 import org.springframework.batch.item.database.JdbcBatchItemWriter;
 import org.springframework.batch.item.database.builder.JdbcBatchItemWriterBuilder;
+import org.springframework.batch.item.file.FlatFileItemReader;
+import org.springframework.batch.item.file.MultiResourceItemReader;
+import org.springframework.batch.item.file.builder.FlatFileItemReaderBuilder;
+import org.springframework.batch.item.file.mapping.FieldSetMapper;
+import org.springframework.batch.item.file.transform.DelimitedLineTokenizer;
+import org.springframework.batch.item.file.transform.LineTokenizer;
+import org.springframework.batch.item.file.transform.PatternMatchingCompositeLineTokenizer;
+import org.springframework.batch.item.support.ClassifierCompositeItemWriter;
 import org.springframework.batch.item.xml.StaxEventItemReader;
 import org.springframework.batch.item.xml.builder.StaxEventItemReaderBuilder;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.classify.Classifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.Resource;
@@ -67,6 +79,7 @@ public class WeatherReport {
         return jobBuilderFactory.get("weatherReportJob")
             .incrementer(new RunIdIncrementer())
             .start(importStations())
+            .next(importSensorReadings())
             .build();
     }
 
@@ -101,6 +114,98 @@ public class WeatherReport {
             .build();
     }
 
+
+    @Bean
+    public Step importSensorReadings() {
+        return stepBuilderFactory.get("importSensorReadings")
+            .<SensorReading, SensorReading>chunk(100)
+            .reader(readingsReader(null))
+            .writer(sensorReadingItemWriter())
+            .build();
+    }
+
+    @Bean
+    @StepScope
+    public MultiResourceItemReader<SensorReading> readingsReader(@Value("#{jobParameters['readingsFiles']}") Resource[] files) {
+        var reader = new MultiResourceItemReader<SensorReading>();
+        reader.setResources(files);
+        reader.setDelegate(sensorReadingItemReader());
+        return reader;
+    }
+
+    private FlatFileItemReader<SensorReading> sensorReadingItemReader() {
+        return new FlatFileItemReaderBuilder<SensorReading>()
+            .name("sensorReadingItemReader")
+            .linesToSkip(1)
+            .lineTokenizer(sensorReadingsLineTokenizer())
+            .fieldSetMapper(sensorReadingsFieldSetMapper())
+            .build();
+    }
+
+    private LineTokenizer sensorReadingsLineTokenizer() {
+        var lineTokenizer = new PatternMatchingCompositeLineTokenizer();
+        lineTokenizer.setTokenizers(Map.of("*WIND*", windLineTokenizer(), "*TEMP*", temperatureLineTokenizer()));
+        return lineTokenizer;
+    }
+
+    @Bean
+    public DelimitedLineTokenizer temperatureLineTokenizer() {
+        var tokenizer = new DelimitedLineTokenizer(";");
+        tokenizer.setNames("stationId", "taken", "type", "temperature");
+        return tokenizer;
+    }
+
+    @Bean
+    public DelimitedLineTokenizer windLineTokenizer() {
+        var tokenizer = new DelimitedLineTokenizer(";");
+        tokenizer.setNames("stationId", "taken", "type", "speed", "direction");
+        return tokenizer;
+    }
+
+    @Bean
+    public FieldSetMapper<SensorReading> sensorReadingsFieldSetMapper() {
+        return fieldSet -> {
+            var stationId = UUID.fromString(fieldSet.readString("stationId"));
+            var taken = Instant.parse(fieldSet.readString("taken"));
+            var measurementType = fieldSet.readString("type");
+            switch (measurementType) {
+                case "WIND":
+                    return new WindReading(stationId, taken, fieldSet.readDouble("speed"), fieldSet.readInt("direction"));
+                case "TEMP":
+                    return new TemperatureReading(stationId, taken, fieldSet.readDouble("temperature"));
+                default:
+                    throw new IllegalArgumentException("Unknown type of measurement: [" + measurementType + "]");
+            }
+        };
+    }
+
+    @Bean
+    public ClassifierCompositeItemWriter<SensorReading> sensorReadingItemWriter() {
+        var classifier = new InsertingReadingWriterClassifier(tempReadingItemWriter(null), windReadingItemWriter(null));
+        var compositeItemWriter = new ClassifierCompositeItemWriter<SensorReading>();
+        compositeItemWriter.setClassifier(classifier);
+        return compositeItemWriter;
+    }
+
+    @Bean
+    public JdbcBatchItemWriter<SensorReading> tempReadingItemWriter(DataSource dataSource) {
+        return new JdbcBatchItemWriterBuilder<SensorReading>()
+            .beanMapped()
+            .sql("INSERT INTO TEMPERATURE_READING (station_id, taken, temperature) " +
+                "VALUES (:stationId, :taken, :temperature)")
+            .dataSource(dataSource)
+            .build();
+    }
+
+    @Bean
+    public JdbcBatchItemWriter<SensorReading> windReadingItemWriter(DataSource dataSource) {
+        return new JdbcBatchItemWriterBuilder<SensorReading>()
+            .beanMapped()
+            .sql("INSERT INTO WIND_READING (station_id, taken, speed, direction) " +
+                "VALUES (:stationId, :taken, :speed, :direction)")
+            .dataSource(dataSource)
+            .build();
+    }
 
 }
 
@@ -158,4 +263,166 @@ class Station {
     public int hashCode() {
         return Objects.hash(id);
     }
+}
+
+interface SensorReading {
+    UUID getStationId();
+    Instant getTaken();
+}
+
+class TemperatureReading implements SensorReading {
+    private UUID stationId;
+    private Instant taken;
+    private double temperature;
+
+    public TemperatureReading(UUID stationId, Instant taken, double temperature) {
+        assert(stationId != null);
+        this.stationId = stationId;
+        this.taken = taken;
+        this.temperature = temperature;
+    }
+
+    @Override
+    public UUID getStationId() {
+        return stationId;
+    }
+
+    public void setStationId(UUID stationId) {
+        this.stationId = stationId;
+    }
+
+    @Override
+    public Instant getTaken() {
+        return taken;
+    }
+
+    public void setTaken(Instant taken) {
+        this.taken = taken;
+    }
+
+    public double getTemperature() {
+        return temperature;
+    }
+
+    public void setTemperature(double temperature) {
+        this.temperature = temperature;
+    }
+
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        TemperatureReading that = (TemperatureReading) o;
+        return Double.compare(that.temperature, temperature) == 0 && Objects.equals(stationId, that.stationId) && Objects.equals(taken, that.taken);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(stationId, taken, temperature);
+    }
+
+    @Override
+    public String toString() {
+        return new StringJoiner(", ", TemperatureReading.class.getSimpleName() + "[", "]")
+            .add("stationId=" + stationId)
+            .add("taken=" + taken)
+            .add("measurementValue=" + temperature)
+            .toString();
+    }
+}
+
+class WindReading implements SensorReading {
+
+    private UUID stationId;
+    private Instant taken;
+    private double speed;
+    private int direction;
+
+    public WindReading(UUID stationId, Instant taken, double speed, int direction) {
+        assert (stationId != null);
+        this.stationId = stationId;
+        this.taken = taken;
+        this.speed = speed;
+        this.direction = direction;
+    }
+
+    @Override
+    public UUID getStationId() {
+        return stationId;
+    }
+
+    @Override
+    public Instant getTaken() {
+        return taken;
+    }
+
+    public void setStationId(UUID stationId) {
+        this.stationId = stationId;
+    }
+
+    public void setTaken(Instant taken) {
+        this.taken = taken;
+    }
+
+    public double getSpeed() {
+        return speed;
+    }
+
+    public void setSpeed(double speed) {
+        this.speed = speed;
+    }
+
+    public int getDirection() {
+        return direction;
+    }
+
+    public void setDirection(int direction) {
+        this.direction = direction;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (o == null || getClass() != o.getClass()) return false;
+        WindReading that = (WindReading) o;
+        return Double.compare(that.speed, speed) == 0 && direction == that.direction && stationId.equals(that.stationId) && taken.equals(that.taken);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(stationId, taken, speed, direction);
+    }
+
+    @Override
+    public String toString() {
+        return new StringJoiner(", ", WindReading.class.getSimpleName() + "[", "]")
+            .add("stationId=" + stationId)
+            .add("taken=" + taken)
+            .add("speed=" + speed)
+            .add("direction=" + direction)
+            .toString();
+    }
+}
+
+class InsertingReadingWriterClassifier implements Classifier<SensorReading, ItemWriter<? super SensorReading>> {
+    private final JdbcBatchItemWriter<SensorReading> tempWriter;
+    private final JdbcBatchItemWriter<SensorReading> windWriter;
+
+    public InsertingReadingWriterClassifier(JdbcBatchItemWriter<SensorReading> tempWriter, JdbcBatchItemWriter<SensorReading> windWriter) {
+        this.tempWriter = tempWriter;
+        this.windWriter = windWriter;
+    }
+
+    @Override
+    public ItemWriter<? super SensorReading> classify(SensorReading reading) {
+        if (reading instanceof TemperatureReading) {
+            return tempWriter;
+        }
+        if (reading instanceof WindReading) {
+            return windWriter;
+        }
+        throw new IllegalArgumentException("Cannot classify [" + reading + "].");
+    }
+
 }
