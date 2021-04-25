@@ -24,6 +24,9 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.StringJoiner;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.DoubleUnaryOperator;
+import java.util.stream.Collectors;
 
 import javax.sql.DataSource;
 import javax.xml.bind.annotation.XmlRootElement;
@@ -35,6 +38,7 @@ import org.springframework.batch.core.configuration.annotation.JobBuilderFactory
 import org.springframework.batch.core.configuration.annotation.StepBuilderFactory;
 import org.springframework.batch.core.configuration.annotation.StepScope;
 import org.springframework.batch.core.launch.support.RunIdIncrementer;
+import org.springframework.batch.item.ItemProcessor;
 import org.springframework.batch.item.ItemWriter;
 import org.springframework.batch.item.database.JdbcBatchItemWriter;
 import org.springframework.batch.item.database.builder.JdbcBatchItemWriterBuilder;
@@ -45,6 +49,7 @@ import org.springframework.batch.item.file.mapping.FieldSetMapper;
 import org.springframework.batch.item.file.transform.DelimitedLineTokenizer;
 import org.springframework.batch.item.file.transform.LineTokenizer;
 import org.springframework.batch.item.file.transform.PatternMatchingCompositeLineTokenizer;
+import org.springframework.batch.item.support.ClassifierCompositeItemProcessor;
 import org.springframework.batch.item.support.ClassifierCompositeItemWriter;
 import org.springframework.batch.item.xml.StaxEventItemReader;
 import org.springframework.batch.item.xml.builder.StaxEventItemReaderBuilder;
@@ -55,6 +60,7 @@ import org.springframework.classify.Classifier;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.io.Resource;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.oxm.jaxb.Jaxb2Marshaller;
 
 @SpringBootApplication
@@ -120,6 +126,7 @@ public class WeatherReport {
         return stepBuilderFactory.get("importSensorReadings")
             .<SensorReading, SensorReading>chunk(100)
             .reader(readingsReader(null))
+            .processor(readingsNormalizer(null))
             .writer(sensorReadingItemWriter())
             .build();
     }
@@ -178,6 +185,21 @@ public class WeatherReport {
             }
         };
     }
+
+    @Bean
+    @StepScope
+    public ItemProcessor<? super SensorReading, ? extends SensorReading> readingsNormalizer(DataSource dataSource) {
+//		return new ReadingNormalizingItemProcessor(dataSource);
+        var processor = new ClassifierCompositeItemProcessor<SensorReading, SensorReading>();
+        processor.setClassifier(getProcessorClassifier(null));
+        return processor;
+    }
+
+    @Bean
+    public SensorReadingItemProcessorClassifier getProcessorClassifier(NamedParameterJdbcTemplate jdbcTemplate) {
+        return new SensorReadingItemProcessorClassifier(jdbcTemplate);
+    }
+
 
     @Bean
     public ClassifierCompositeItemWriter<SensorReading> sensorReadingItemWriter() {
@@ -402,6 +424,64 @@ class WindReading implements SensorReading {
             .add("speed=" + speed)
             .add("direction=" + direction)
             .toString();
+    }
+}
+
+class SensorReadingItemProcessorClassifier implements Classifier<SensorReading, ItemProcessor<?, ? extends SensorReading>> {
+    @SuppressWarnings("SqlResolve")
+    public static final String UNITS_QUERY = "SELECT temp_unit AS TEMP, speed_unit as SPEED FROM station WHERE id = :id";
+    private final ConcurrentHashMap<UUID, Map<String, DoubleUnaryOperator>> stationUnits = new ConcurrentHashMap<>();
+    private final NamedParameterJdbcTemplate jdbcTemplate;
+
+    public SensorReadingItemProcessorClassifier(NamedParameterJdbcTemplate jdbcTemplate) {
+        this.jdbcTemplate = jdbcTemplate;
+    }
+
+    @Override
+    public ItemProcessor<?, ? extends SensorReading> classify(SensorReading item) {
+        var stationId = item.getStationId();
+        var conversionOperators = stationUnits.computeIfAbsent(stationId, this::fetchConversionOperationsForStation);
+        if (item instanceof TemperatureReading) {
+            return tempNormalizingProcessor(conversionOperators.get("TEMP"));
+        } else if (item instanceof WindReading) {
+            return windNormalizingProcessor(conversionOperators.get("SPEED"));
+        } else {
+            throw new IllegalArgumentException("Unknown reading [" + item + "]");
+        }
+    }
+
+    private ItemProcessor<TemperatureReading,? extends SensorReading> tempNormalizingProcessor(DoubleUnaryOperator operator) {
+        return (ItemProcessor<TemperatureReading, SensorReading>) item -> {
+            item.setTemperature(operator.applyAsDouble(item.getTemperature()));
+            return item;
+        };
+    }
+
+    private ItemProcessor<WindReading,? extends SensorReading> windNormalizingProcessor(DoubleUnaryOperator operator) {
+        return (ItemProcessor<WindReading, SensorReading>) item -> {
+            item.setSpeed(operator.applyAsDouble(item.getSpeed()));
+            return item;
+        };
+    }
+
+    private Map<String, DoubleUnaryOperator> fetchConversionOperationsForStation(UUID uuid) {
+        return jdbcTemplate.queryForMap(UNITS_QUERY, Map.of("id", uuid)).entrySet().stream().collect(Collectors.toMap(Map.Entry::getKey, this::getConversionOperator));
+    }
+
+    private DoubleUnaryOperator getConversionOperator(Map.Entry<String, Object> e) {
+        switch ((String) e.getValue()) {
+            case "m/s":
+            case "C":
+                return value -> value;
+            case "F":
+                return value -> (value - 32) / 1.8;
+            case "km/h":
+                return value -> value * 0.27778;
+            case "mph":
+                return value -> value * 0.44704;
+            default:
+                throw new IllegalArgumentException("No conversion supported for " + e.getValue());
+        }
     }
 }
 
