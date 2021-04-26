@@ -22,11 +22,15 @@ package dev.softwaregarden.spring.batch.first_steps.testing.exercise;
 import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.StandardOpenOption;
+import java.util.List;
 
 import dev.softwaregarden.spring.batch.first_steps.testing.excercise.CopyPasteNumbersJob;
+import static org.junit.jupiter.api.Assertions.*;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
+import org.springframework.batch.core.ExitStatus;
+import org.springframework.batch.core.JobParametersBuilder;
 import org.springframework.batch.test.JobLauncherTestUtils;
 import org.springframework.batch.test.context.SpringBatchTest;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -53,7 +57,30 @@ public class CopyPasteNumbersTest {
 
         Files.writeString(numbersFile.toPath(), generateBrokenFileContent(), StandardOpenOption.CREATE_NEW);
 
-        //TODO finish this test to ensure the CopyPasteNumbersJob can restart and continue
+        var jobParameters = new JobParametersBuilder()
+            .addString("numbersFile", numbersFile.toURI().toString())
+            .addString("parsedNumbersFile", parsedNumbersFile.toURI().toString())
+            .toJobParameters();
+        var firstExecution = jobLauncherTestUtils.launchJob(jobParameters);
+
+        assertEquals(ExitStatus.FAILED.getExitCode(), firstExecution.getExitStatus().getExitCode());
+        assertEquals("1\n2\n3\n4\n5\n6\n", Files.readString(parsedNumbersFile.toPath()));
+        var stepExecution = List.copyOf(firstExecution.getStepExecutions()).get(0);
+        assertEquals(6, stepExecution.getReadCount());
+        assertEquals(6, stepExecution.getWriteCount());
+        assertEquals(2, stepExecution.getCommitCount());
+
+
+        Files.writeString(numbersFile.toPath(), generateCorrectFileContent(), StandardOpenOption.TRUNCATE_EXISTING);
+        var secondExecution = jobLauncherTestUtils.launchJob(jobParameters);
+
+        assertEquals("1\n2\n3\n4\n5\n6\n7\n8\n9", Files.readString(numbersFile.toPath()));
+        assertEquals(ExitStatus.COMPLETED.getExitCode(), secondExecution.getExitStatus().getExitCode());
+        var repeatedStepExecution = List.copyOf(secondExecution.getStepExecutions()).get(0);
+        assertEquals(3, repeatedStepExecution.getReadCount());
+        assertEquals(3, repeatedStepExecution.getWriteCount());
+        assertEquals(2, repeatedStepExecution.getCommitCount());
+
     }
 
     private String generateBrokenFileContent() {
